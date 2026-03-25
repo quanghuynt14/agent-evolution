@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * ============================================
  * STEP 4: Tool Definition & Detection

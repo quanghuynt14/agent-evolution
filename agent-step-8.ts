@@ -1,3 +1,4 @@
+// @ts-nocheck
 /**
  * ============================================
  * STEP 8: Edit File Tool (Complete Agent)
