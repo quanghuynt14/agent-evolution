@@ -1,0 +1,173 @@
+/**
+ * ============================================
+ * STEP 5: Tool Execution & Agentic Loop
+ * ============================================
+ *
+ * CONCEPT: The model asked to use a tool -- now we actually execute it
+ * and send the result back. Then the model might call another tool, or
+ * respond with text. This back-and-forth is the AGENTIC LOOP -- the
+ * core pattern of every coding agent.
+ *
+ * This is the key architectural shift:
+ *   Step 4: ask LLM -> get response -> done
+ *   Step 5: ask LLM -> [tool call -> execute -> send result -> ask LLM again]* -> text -> done
+ *
+ * WHAT'S NEW (vs Step 4):
+ *   + Execute list_files tool (readdirSync)
+ *   + Send tool results back to the model (role: "function")
+ *   + while(true) inner loop -- keeps going until model responds with text
+ *   + The model can now actually see and report file listings
+ *
+ * RUN: npx tsx agent-step-5.ts
+ * TEST: Ask "what files are in the current directory?"
+ *       You should see the tool call, the file listing, AND the model's
+ *       summary of what it found. That's the agentic loop in action.
+ */
+
+import * as readline from "node:readline";
+import { readFileSync, readdirSync } from "node:fs";
+
+// --- Load .env file ---
+const env = readFileSync(".env", "utf-8");
+for (const line of env.split("\n")) {
+  const [key, ...vals] = line.split("=");
+  if (key?.trim() && vals.length) {
+    const v = vals.join("=").trim();
+    if (v && !v.startsWith("#")) process.env[key.trim()] = v;
+  }
+}
+
+const API_KEY = process.env.GEMINI_API_KEY;
+if (!API_KEY) {
+  console.error("Missing GEMINI_API_KEY in .env file");
+  process.exit(1);
+}
+
+const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+const prompt = (q: string): Promise<string> =>
+  new Promise((resolve) => rl.question(q, resolve));
+
+const messages: any[] = [];
+
+async function chat(userMessage: string): Promise<string> {
+  messages.push({
+    role: "user",
+    parts: [{ text: userMessage }],
+  });
+
+  // [NEW] Agentic loop -- keep calling the API until the model responds with text
+  while (true) {
+    const body = {
+      systemInstruction: {
+        parts: [
+          {
+            text: `You are Jarvis, a coding assistant. You help users with programming tasks.
+
+You have access to tools that let you interact with the filesystem and run commands.
+Use tools proactively — for example, list files to understand a project before asking
+the user for specific paths.
+
+Working directory: ${process.cwd()}`,
+          },
+        ],
+      },
+      contents: messages,
+      tools: [
+        {
+          functionDeclarations: [
+            {
+              name: "list_files",
+              description: "List files and directories at the given path",
+              parameters: {
+                type: "object",
+                properties: {
+                  directory: {
+                    type: "string",
+                    description: "Directory path to list",
+                  },
+                },
+                required: ["directory"],
+              },
+            },
+          ],
+        },
+      ],
+      generationConfig: {
+        thinkingConfig: { thinkingBudget: 0 },
+      },
+    };
+
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${API_KEY}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      }
+    );
+
+    const data = await res.json();
+
+    if (!data.candidates?.[0]?.content) {
+      console.error("Unexpected API response:", JSON.stringify(data, null, 2));
+      return "Error: unexpected response from API";
+    }
+
+    messages.push(data.candidates[0].content);
+
+    const functionCall = data.candidates[0].content.parts.find(
+      (part: any) => part.functionCall
+    );
+
+    if (functionCall) {
+      const { name, args } = functionCall.functionCall;
+      console.log(`Tool call: ${name}(${JSON.stringify(args)})`);
+
+      // [NEW] Execute the tool
+      let result: string;
+      if (name === "list_files") {
+        const files = readdirSync(args.directory);
+        result = files.join("\n");
+      } else {
+        result = `Unknown tool: ${name}`;
+      }
+
+      console.log(`Result: ${result}`);
+
+      // [NEW] Send tool result back to the model
+      messages.push({
+        role: "function",
+        parts: [
+          {
+            functionResponse: {
+              name: name,
+              response: { name: name, content: result },
+            },
+          },
+        ],
+      });
+
+      // Continue the loop -- the model will process the result
+    } else {
+      // Text response -- we're done
+      return data.candidates[0].content.parts[0].text;
+    }
+  }
+}
+
+async function main() {
+  console.log("Step 5: Tool Execution & Agentic Loop (tools actually work now!)");
+  console.log('Try: "what files are in the current directory?"\n');
+
+  while (true) {
+    const input = await prompt("> ");
+    if (input.toLowerCase() === "exit") break;
+
+    const response = await chat(input);
+    console.log(response);
+  }
+
+  rl.close();
+}
+
+main().catch(console.error);
